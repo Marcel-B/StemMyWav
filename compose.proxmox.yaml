@@ -8,6 +8,8 @@ services:
       MacBackend__ApiKey: ${STEMMYWAV_MAC_API_KEY:?set in .env}
     volumes:
       - stemmywav-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
     networks:
       - stemmywav
 

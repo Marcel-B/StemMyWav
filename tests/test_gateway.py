@@ -103,6 +103,18 @@ class GatewayIntegrationTest(unittest.TestCase):
                 else:
                     self.fail("Gateway did not start")
 
+                status, payload = request(base + "/openapi/v1.json")
+                self.assertEqual(200, status)
+                specification = json.loads(payload)
+                self.assertEqual("StemMyWav Gateway API", specification["info"]["title"])
+                self.assertEqual("apiKey", specification["components"]["securitySchemes"]["GatewayApiKey"]["type"])
+                self.assertEqual("X-Api-Key", specification["components"]["securitySchemes"]["GatewayApiKey"]["name"])
+                self.assertEqual({"GatewayApiKey": []}, specification["paths"]["/api/jobs"]["post"]["security"][0])
+                self.assertEqual("binary", specification["components"]["schemas"]["Stream"]["format"])
+                self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs"]["post"]["requestBody"]["content"]["audio/flac"]["schema"]["$ref"])
+                self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs/{id}/result"]["get"]["responses"]["200"]["content"]["application/zip"]["schema"]["$ref"])
+                self.assertEqual(200, request(base + "/swagger/index.html")[0])
+
                 self.assertEqual(401, request(base + "/api/jobs/00000000-0000-0000-0000-000000000000")[0])
                 self.assertEqual(400, request(base + "/api/jobs", "POST", b"invalid", "gateway-test-key", "audio/flac")[0])
                 status, payload = request(base + "/api/jobs?dereverb=true", "POST", b"fLaCtest", "gateway-test-key", "audio/flac")
@@ -124,11 +136,15 @@ class GatewayIntegrationTest(unittest.TestCase):
 
                 self.assertEqual(2, job["attempts"])
                 self.assertEqual(2, MacStub.attempts)
+                self.assertFalse((path / "data" / job_id / "input.flac").exists())
                 status, payload = request(base + f"/api/jobs/{job_id}/result", key="gateway-test-key")
                 self.assertEqual(200, status)
                 with ZipFile(io.BytesIO(payload)) as archive:
                     self.assertEqual({"vocals.wav", "instrumental.wav", "vocals_dry.wav", "vocals_reverb.wav"}, set(archive.namelist()))
                 self.assertEqual(401, request(base + f"/api/jobs/{job_id}/result")[0])
+                self.assertEqual(204, request(base + f"/api/jobs/{job_id}", "DELETE", key="gateway-test-key")[0])
+                self.assertFalse((path / "data" / job_id).exists())
+                self.assertEqual(404, request(base + f"/api/jobs/{job_id}", key="gateway-test-key")[0])
             finally:
                 gateway.terminate()
                 gateway.wait(timeout=10)

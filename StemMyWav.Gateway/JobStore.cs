@@ -17,7 +17,7 @@ public sealed class JobStore(IConfiguration configuration)
     private readonly string _root = Path.GetFullPath(configuration["Gateway:DataDirectory"] ?? "data");
     private readonly object _sync = new();
     private readonly SemaphoreSlim _createGate = new(1, 1);
-    private readonly int _maxPending = Math.Max(1, configuration.GetValue("Gateway:MaxPendingJobs", 20));
+    private readonly int _maxPending = Math.Max(1, configuration.GetValue("Gateway:MaxPendingJobs", 2));
 
     public async Task<JobRecord> CreateAsync(Stream input, bool dereverb, CancellationToken token)
     {
@@ -94,6 +94,19 @@ public sealed class JobStore(IConfiguration configuration)
 
     public string InputPath(Guid id) => Path.Combine(_root, id.ToString("D"), "input.flac");
     public string ResultPath(Guid id) => Path.Combine(_root, id.ToString("D"), "stems.zip");
+
+    public void RemoveInput(Guid id) => File.Delete(InputPath(id));
+
+    public bool DeleteTerminal(Guid id)
+    {
+        lock (_sync)
+        {
+            var job = Read(id);
+            if (job is null || job.Status is not ("completed" or "failed")) return false;
+            Directory.Delete(Path.Combine(_root, id.ToString("D")), true);
+            return true;
+        }
+    }
 
     public void CleanupExpired(TimeSpan retention)
     {

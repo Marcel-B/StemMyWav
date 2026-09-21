@@ -11,6 +11,6 @@ fi
 export MacApi__Key="$(<"$key_file")"
 export Separator__Executable="$project/.venv/bin/mlx-audio-separator"
 export Separator__ModelDirectory="$project/.models"
-export ASPNETCORE_URLS=http://127.0.0.1:5080
+export ASPNETCORE_URLS=http://127.0.0.1:5081
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 exec /usr/local/share/dotnet/dotnet "$project/deploy/mac/publish/StemMyWav.Api.dll"

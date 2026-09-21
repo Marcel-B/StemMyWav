@@ -13,7 +13,7 @@ public sealed class JobWorker(JobStore store, IHttpClientFactory clients, IConfi
                     await ProcessAsync(job, stoppingToken);
                 if (DateTimeOffset.UtcNow - lastCleanup >= TimeSpan.FromHours(1))
                 {
-                    store.CleanupExpired(TimeSpan.FromDays(Math.Max(1, config.GetValue("Gateway:RetentionDays", 7))));
+                    store.CleanupExpired(TimeSpan.FromDays(Math.Max(1, config.GetValue("Gateway:RetentionDays", 1))));
                     lastCleanup = DateTimeOffset.UtcNow;
                 }
             }
@@ -54,9 +54,11 @@ public sealed class JobWorker(JobStore store, IHttpClientFactory clients, IConfi
                     throw new InvalidDataException("Mac-API lieferte unvollständige Stems.");
             }
             File.Move(temporary, target, true);
+            await input.DisposeAsync();
             job.Status = "completed";
             job.LastError = null;
             store.Save(job);
+            RemoveInput(job.Id);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -69,6 +71,7 @@ public sealed class JobWorker(JobStore store, IHttpClientFactory clients, IConfi
             job.Status = "failed";
             job.LastError = error.Message;
             store.Save(job);
+            RemoveInput(job.Id);
         }
         catch (Exception error)
         {
@@ -78,6 +81,13 @@ public sealed class JobWorker(JobStore store, IHttpClientFactory clients, IConfi
             job.NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(Math.Min(300, 15 * Math.Pow(2, Math.Min(5, job.Attempts - 1))));
             store.Save(job);
         }
+    }
+
+    private void RemoveInput(Guid id)
+    {
+        try { store.RemoveInput(id); }
+        catch (IOException error) { logger.LogWarning(error, "Input cleanup failed for job {JobId}", id); }
+        catch (UnauthorizedAccessException error) { logger.LogWarning(error, "Input cleanup failed for job {JobId}", id); }
     }
 }
 
