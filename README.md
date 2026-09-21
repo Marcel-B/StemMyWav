@@ -14,6 +14,29 @@ YuE_To_Logic (Proxmox/Docker)
 
 Die MLX-Anwendung läuft nativ auf macOS. Docker Desktop und Podman starten auf dem Mac Linux-Container ohne Zugriff auf Metal. Deshalb enthält `compose.proxmox.yaml` nur den Gateway. Die Mac-API läuft als `launchd`-Dienst und Tailscale Serve stellt sie ausschließlich im Tailnet bereit. Beide API-Strecken benötigen jeweils einen eigenen Schlüssel.
 
+## Projektaufbau
+
+Beide Dienste sind nach Zuständigkeit gegliedert; `Program.cs` enthält jeweils nur noch die Komposition.
+
+```text
+StemMyWav.Gateway/
+  Http/           Endpunkte, Antworttypen, Schlüsselprüfung
+  Jobs/           Auftragsmodell, Ablage auf der Platte, Übertragung an den Mac
+  OpenApi/        Ergänzungen am erzeugten Dokument
+  Configuration/  Gateway- und Backend-Einstellungen, Geheimnisse aus Datei
+StemMyWav.Api/
+  Http/           Endpunkte und Schlüsselprüfung
+  Separation/     Ablauf der Trennung und Ausführung externer Programme
+  Configuration/  Separator- und Schlüsseleinstellungen
+StemMyWav.Api.Tests/  Unit-Tests der Trennlogik, ohne echte Prozesse
+```
+
+Die Schlüsselprüfung ist in beiden Diensten bewusst doppelt vorhanden: ein gemeinsames Projekt für rund fünfzehn Zeilen würde Build und Auslieferung mehr belasten, als es spart.
+
+Einstellungen werden beim Start geprüft. Ein fehlender Schlüssel, eine unerreichbare Backend-Adresse oder ein unsinniger Zahlenwert lassen den Dienst sofort abbrechen statt erst beim ersten Auftrag.
+
+Die Trennlogik ruft externe Programme über eine schmale Schnittstelle auf. Dadurch prüfen die Unit-Tests Vorbereitung, Modellaufrufe und Verpackung ohne FFmpeg und ohne Modelle: `dotnet test StemMyWav.Api.Tests`. Der Gateway wird als Prozess gegen einen Mac-Stub getestet: `python3 -m unittest discover -s tests`.
+
 ## Mac einrichten
 
 Voraussetzungen: Apple Silicon, macOS, .NET 10, Python 3.10+ und FFmpeg. Auf diesem Mac liegen die Python-Umgebung in `.venv` und die geladenen Modelle in `.models`. Ein erneutes Setup ist möglich mit:
@@ -37,7 +60,7 @@ openssl rand -hex 32 > ~/.config/stemmywav/mac-api-key
 
 ## Proxmox-Gateway einrichten
 
-Der Workflow `.github/workflows/ci.yaml` baut beide .NET-Projekte und führt den Gateway-Integrationstest bei Pull Requests und Pushes aus. Nach erfolgreichen Tests wird auf `main` und bei Tags `v*` ein Linux/amd64-Gateway-Image nach `ghcr.io/<owner>/<repository>` veröffentlicht. Verfügbar sind `:main`, Versions-Tags ohne führendes `v` und ein `sha-...`-Tag. Der Workflow verwendet dafür das automatische `GITHUB_TOKEN` mit `packages: write`; API-Schlüssel werden nicht an den Build übergeben. Pull Requests bauen das Image nur zur Prüfung, ohne Push. Vor einem Release müssen Repository und Git-Remote auf GitHub eingerichtet sein.
+Der Workflow `.github/workflows/ci.yaml` baut beide .NET-Projekte und führt bei Pull Requests und Pushes die Unit-Tests der Trennlogik sowie den Gateway-Integrationstest aus. Nach erfolgreichen Tests wird auf `main` und bei Tags `v*` ein Linux/amd64-Gateway-Image nach `ghcr.io/<owner>/<repository>` veröffentlicht. Verfügbar sind `:main`, Versions-Tags ohne führendes `v` und ein `sha-...`-Tag. Der Workflow verwendet dafür das automatische `GITHUB_TOKEN` mit `packages: write`; API-Schlüssel werden nicht an den Build übergeben. Pull Requests bauen das Image nur zur Prüfung, ohne Push. Vor einem Release müssen Repository und Git-Remote auf GitHub eingerichtet sein.
 
 Wenn das GHCR-Paket privat ist, muss Proxmox sich mit einem Token mit `read:packages` bei `ghcr.io` anmelden, bevor `docker compose pull` funktioniert. Für ein öffentliches Paket ist kein Pull-Token nötig.
 

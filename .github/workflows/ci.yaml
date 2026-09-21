@@ -28,6 +28,8 @@ jobs:
         run: dotnet build StemMyWav.Api/StemMyWav.Api.csproj --configuration Release
       - name: Build gateway
         run: dotnet build StemMyWav.Gateway/StemMyWav.Gateway.csproj --configuration Debug
+      - name: Mac API unit tests
+        run: dotnet test StemMyWav.Api.Tests/StemMyWav.Api.Tests.csproj --configuration Debug
       - name: Gateway integration tests
         run: python3 -m unittest discover -s tests -v
 

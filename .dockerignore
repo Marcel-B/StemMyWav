@@ -14,6 +14,7 @@ secrets
 tests
 scripts
 StemMyWav.Api
+StemMyWav.Api.Tests
 deploy
 README.md
 .env.example
