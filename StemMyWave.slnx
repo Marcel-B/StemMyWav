@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="StemMyWav.Api/StemMyWav.Api.csproj" />
   <Project Path="StemMyWav.Gateway/StemMyWav.Gateway.csproj" />
+  <Project Path="StemMyWav.Api.Tests/StemMyWav.Api.Tests.csproj" />
 </Solution>

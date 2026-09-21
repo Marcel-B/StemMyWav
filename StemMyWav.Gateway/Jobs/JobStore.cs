@@ -1,59 +1,43 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
+using StemMyWav.Gateway.Configuration;
 
-public sealed class JobRecord
+namespace StemMyWav.Gateway.Jobs;
+
+/// <summary>Hält die Aufträge als Verzeichnis je Auftrag auf der Platte und wacht über die
+/// Kapazität der Warteschlange. Die Gültigkeit der hochgeladenen Datei prüft die API-Schicht.</summary>
+public sealed class JobStore(IOptions<GatewayOptions> options)
 {
-    public Guid Id { get; set; }
-    public string Status { get; set; } = "queued";
-    public bool Dereverb { get; set; }
-    public int Attempts { get; set; }
-    public string? LastError { get; set; }
-    public DateTimeOffset CreatedUtc { get; set; } = DateTimeOffset.UtcNow;
-    public DateTimeOffset UpdatedUtc { get; set; } = DateTimeOffset.UtcNow;
-    public DateTimeOffset NextAttemptUtc { get; set; } = DateTimeOffset.UtcNow;
-}
-
-public enum JobCreateStatus { Created, QueueFull, InvalidFlac }
-
-public readonly record struct JobCreateResult(JobCreateStatus Status, JobRecord? Job);
-
-public sealed class JobStore(IConfiguration configuration)
-{
-    private readonly string _root = Path.GetFullPath(configuration["Gateway:DataDirectory"] ?? "data");
+    private readonly string _root = Path.GetFullPath(options.Value.DataDirectory);
+    private readonly int _maxPending = options.Value.MaxPendingJobs;
     private readonly object _sync = new();
     private readonly SemaphoreSlim _createGate = new(1, 1);
-    private readonly int _maxPending = Math.Max(1, configuration.GetValue("Gateway:MaxPendingJobs", 2));
 
-    public async Task<JobCreateResult> CreateAsync(Stream input, bool dereverb, CancellationToken token)
+    /// <summary>Legt einen Auftrag an und schreibt die Eingabe auf die Platte. Liefert null,
+    /// wenn die Warteschlange voll ist. Der bereits gelesene Anfang des Bodys wird vorangestellt.</summary>
+    public async Task<JobRecord?> CreateAsync(ReadOnlyMemory<byte> prefix, Stream rest, bool dereverb, CancellationToken token)
     {
         await _createGate.WaitAsync(token);
-        try { return await CreateCoreAsync(input, dereverb, token); }
+        try { return await CreateCoreAsync(prefix, rest, dereverb, token); }
         finally { _createGate.Release(); }
     }
 
-    private async Task<JobCreateResult> CreateCoreAsync(Stream input, bool dereverb, CancellationToken token)
+    private async Task<JobRecord?> CreateCoreAsync(ReadOnlyMemory<byte> prefix, Stream rest, bool dereverb, CancellationToken token)
     {
         Directory.CreateDirectory(_root);
-        if (CountActive() >= _maxPending) return new(JobCreateStatus.QueueFull, null);
+        if (CountActive() >= _maxPending) return null;
         var job = new JobRecord { Id = Guid.NewGuid(), Dereverb = dereverb };
         var dir = Path.Combine(_root, job.Id.ToString("D"));
         Directory.CreateDirectory(dir);
         try
         {
-            var source = Path.Combine(dir, "input.flac");
-            await using (var file = File.Create(source)) await input.CopyToAsync(file, token);
-            bool valid;
-            await using (var file = File.OpenRead(source))
+            await using (var file = File.Create(Path.Combine(dir, "input.flac")))
             {
-                var header = new byte[4];
-                valid = await file.ReadAsync(header, token) == 4 && header.AsSpan().SequenceEqual("fLaC"u8);
-            }
-            if (!valid)
-            {
-                Directory.Delete(dir, true);
-                return new(JobCreateStatus.InvalidFlac, null);
+                await file.WriteAsync(prefix, token);
+                await rest.CopyToAsync(file, token);
             }
             Save(job);
-            return new(JobCreateStatus.Created, job);
+            return job;
         }
         catch { Directory.Delete(dir, true); throw; }
     }
@@ -64,7 +48,7 @@ public sealed class JobStore(IConfiguration configuration)
         foreach (var dir in Directory.EnumerateDirectories(_root))
         {
             if (Guid.TryParse(Path.GetFileName(dir), out var id) && Read(id) is { } job &&
-                job.Status is "queued" or "processing" && job.NextAttemptUtc <= DateTimeOffset.UtcNow)
+                job.Status is JobStatus.Queued or JobStatus.Processing && job.NextAttemptUtc <= DateTimeOffset.UtcNow)
                 yield return job;
         }
     }
@@ -75,7 +59,7 @@ public sealed class JobStore(IConfiguration configuration)
         var count = 0;
         foreach (var dir in Directory.EnumerateDirectories(_root))
             if (Guid.TryParse(Path.GetFileName(dir), out var id) && Read(id) is { } job &&
-                job.Status is "queued" or "processing")
+                job.Status is JobStatus.Queued or JobStatus.Processing)
                 count++;
         return count;
     }
@@ -86,6 +70,8 @@ public sealed class JobStore(IConfiguration configuration)
         lock (_sync) return File.Exists(path) ? JsonSerializer.Deserialize<JobRecord>(File.ReadAllText(path)) : null;
     }
 
+    /// <summary>Schreibt den Zustand atomar. Ein inzwischen abgebrochener Auftrag wird dabei
+    /// nicht wiederbelebt: fehlt sein Verzeichnis, verfällt der Schreibvorgang.</summary>
     public void Save(JobRecord job)
     {
         job.UpdatedUtc = DateTimeOffset.UtcNow;
@@ -111,7 +97,7 @@ public sealed class JobStore(IConfiguration configuration)
         lock (_sync)
         {
             var job = Read(id);
-            if (job is null || job.Status == "processing") return false;
+            if (job is null || job.Status == JobStatus.Processing) return false;
             Directory.Delete(Path.Combine(_root, id.ToString("D")), true);
             return true;
         }
@@ -124,7 +110,7 @@ public sealed class JobStore(IConfiguration configuration)
         foreach (var dir in Directory.EnumerateDirectories(_root))
         {
             if (Guid.TryParse(Path.GetFileName(dir), out var id) && Read(id) is { } job &&
-                job.Status is "completed" or "failed" && job.UpdatedUtc < cutoff)
+                job.Status is JobStatus.Completed or JobStatus.Failed && job.UpdatedUtc < cutoff)
                 lock (_sync)
                     if (Directory.Exists(dir)) Directory.Delete(dir, true);
         }

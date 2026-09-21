@@ -1,3 +1,7 @@
+namespace StemMyWav.Gateway.Configuration;
+
+/// <summary>Liest ein Geheimnis entweder direkt aus der Konfiguration oder, wenn ein Schlüssel
+/// mit dem Zusatz File gesetzt ist, aus der dort genannten Datei.</summary>
 public static class Secrets
 {
     public static string Read(IConfiguration configuration, string name)

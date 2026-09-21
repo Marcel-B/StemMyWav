@@ -157,6 +157,10 @@ class GatewayIntegrationTest(unittest.TestCase):
                 self.assertEqual("X-Api-Key", specification["components"]["securitySchemes"]["GatewayApiKey"]["name"])
                 self.assertEqual({"GatewayApiKey": []}, specification["paths"]["/api/jobs"]["post"]["security"][0])
                 self.assertEqual("binary", specification["components"]["schemas"]["Stream"]["format"])
+                self.assertEqual(["queued", "processing", "completed", "failed"],
+                                 specification["components"]["schemas"]["JobStatus"]["enum"])
+                self.assertEqual("#/components/schemas/JobStatus",
+                                 specification["components"]["schemas"]["JobStatusResponse"]["properties"]["status"]["$ref"])
                 self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs"]["post"]["requestBody"]["content"]["audio/flac"]["schema"]["$ref"])
                 self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs/{id}/result"]["get"]["responses"]["200"]["content"]["application/zip"]["schema"]["$ref"])
                 self.assertEqual(200, request(base + "/swagger/index.html")[0])
@@ -232,14 +236,6 @@ class QueueRecoveryTest(unittest.TestCase):
     def test_queue_full_reports_problem_json_and_a_cancelled_job_frees_the_slot(self):
         UnauthorizedStub.attempts = 0
         with run_gateway(UnauthorizedStub, Gateway__MaxPendingJobs="1") as (base, _data):
-            # Die Kapazitätsprüfung greift bewusst vor dem Lesen des Bodys, deshalb wird die
-            # FLAC-Prüfung geprüft, solange die Warteschlange noch frei ist.
-            status, payload, headers = request_full(base + "/api/jobs", "POST", b"invalid",
-                                                    "gateway-test-key", "audio/flac")
-            self.assertEqual(400, status)
-            self.assertEqual("application/problem+json", headers["Content-Type"].split(";")[0])
-            self.assertEqual("Ungültige FLAC-Datei.", json.loads(payload)["detail"])
-
             status, payload = request(base + "/api/jobs", "POST", b"fLaCtest", "gateway-test-key", "audio/flac")
             self.assertEqual(202, status)
             job_id = json.loads(payload)["id"]
@@ -250,6 +246,14 @@ class QueueRecoveryTest(unittest.TestCase):
             self.assertEqual("60", headers["Retry-After"])
             self.assertEqual("application/problem+json", headers["Content-Type"].split(";")[0])
             self.assertEqual(429, json.loads(payload)["status"])
+
+            # Die Dateiprüfung liegt an der API-Grenze und entscheidet vor der Kapazität,
+            # eine ungültige Datei wird also auch bei voller Warteschlange als solche gemeldet.
+            status, payload, headers = request_full(base + "/api/jobs", "POST", b"invalid",
+                                                    "gateway-test-key", "audio/flac")
+            self.assertEqual(400, status)
+            self.assertEqual("application/problem+json", headers["Content-Type"].split(";")[0])
+            self.assertEqual("Ungültige FLAC-Datei.", json.loads(payload)["detail"])
 
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
