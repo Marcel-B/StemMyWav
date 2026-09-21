@@ -14,6 +14,7 @@ public static class SeparationEndpoints
     private static async Task<IResult> SeparateAsync(
         HttpContext context,
         SeparatorService service,
+        Workspaces workspaces,
         ILogger<SeparatorService> logger,
         bool? dereverb)
     {
@@ -26,8 +27,7 @@ public static class SeparationEndpoints
         if (read != prefix.Length || !prefix.AsSpan().SequenceEqual("fLaC"u8))
             return Results.Problem("Ungültige FLAC-Datei.", statusCode: 400);
 
-        var work = Path.Combine(Path.GetTempPath(), "stemmywav-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(work);
+        var work = workspaces.Create();
         var keepUntilSent = false;
         try
         {
@@ -38,7 +38,7 @@ public static class SeparationEndpoints
                 await context.Request.Body.CopyToAsync(file, context.RequestAborted);
             }
             var archive = await service.RunAsync(input, work, dereverb == true, context.RequestAborted);
-            context.Response.OnCompleted(() => { Directory.Delete(work, true); return Task.CompletedTask; });
+            context.Response.OnCompleted(() => { workspaces.Release(work); return Task.CompletedTask; });
             keepUntilSent = true;
             return Results.File(archive, "application/zip", "stems.zip");
         }
@@ -51,6 +51,6 @@ public static class SeparationEndpoints
             logger.LogError(error, "Separation failed");
             return Results.Problem("Stem-Separation fehlgeschlagen. Server-Logs prüfen.", statusCode: 500);
         }
-        finally { if (!keepUntilSent) Directory.Delete(work, true); }
+        finally { if (!keepUntilSent) workspaces.Release(work); }
     }
 }

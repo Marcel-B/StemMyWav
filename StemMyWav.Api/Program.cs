@@ -18,6 +18,8 @@ builder.Services.AddOptions<SeparatorOptions>()
 
 builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
 builder.Services.AddSingleton<SeparatorService>();
+builder.Services.AddSingleton(new Workspaces(Path.GetTempPath()));
+builder.Services.AddHostedService<WorkspaceCleaner>();
 
 var app = builder.Build();
 
