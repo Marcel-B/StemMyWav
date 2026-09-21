@@ -1,0 +1,16 @@
+bin/
+obj/
+/packages/
+riderModule.iml
+/_ReSharper.Caches/
+**/bin/
+**/obj/
+.DS_Store
+.venv/
+.pip-cache/
+.models/
+test-results/
+deploy/mac/publish/
+.env
+secrets/
+.idea/

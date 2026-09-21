@@ -1,0 +1,15 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY StemMyWav.Gateway/StemMyWav.Gateway.csproj StemMyWav.Gateway/
+RUN dotnet restore StemMyWav.Gateway/StemMyWav.Gateway.csproj
+COPY StemMyWav.Gateway/ StemMyWav.Gateway/
+RUN dotnet publish StemMyWav.Gateway/StemMyWav.Gateway.csproj -c Release -o /out --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+WORKDIR /app
+COPY --from=build /out .
+RUN mkdir /data && chown -R 1654:1654 /data
+USER 1654
+ENV ASPNETCORE_URLS=http://+:8080 Gateway__DataDirectory=/data
+EXPOSE 8080
+ENTRYPOINT ["dotnet", "StemMyWav.Gateway.dll"]

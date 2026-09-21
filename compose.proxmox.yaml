@@ -1,0 +1,19 @@
+services:
+  stemmywav:
+    image: ${STEMMYWAV_GATEWAY_IMAGE:?set in .env}
+    restart: unless-stopped
+    environment:
+      MacBackend__Url: ${STEMMYWAV_MAC_URL:?set in .env}
+      Gateway__ApiKey: ${STEMMYWAV_GATEWAY_API_KEY:?set in .env}
+      MacBackend__ApiKey: ${STEMMYWAV_MAC_API_KEY:?set in .env}
+    volumes:
+      - stemmywav-data:/data
+    networks:
+      - stemmywav
+
+volumes:
+  stemmywav-data:
+
+networks:
+  stemmywav:
+    name: stemmywav
