@@ -12,6 +12,10 @@ public sealed class JobRecord
     public DateTimeOffset NextAttemptUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 
+public enum JobCreateStatus { Created, QueueFull, InvalidFlac }
+
+public readonly record struct JobCreateResult(JobCreateStatus Status, JobRecord? Job);
+
 public sealed class JobStore(IConfiguration configuration)
 {
     private readonly string _root = Path.GetFullPath(configuration["Gateway:DataDirectory"] ?? "data");
@@ -19,18 +23,17 @@ public sealed class JobStore(IConfiguration configuration)
     private readonly SemaphoreSlim _createGate = new(1, 1);
     private readonly int _maxPending = Math.Max(1, configuration.GetValue("Gateway:MaxPendingJobs", 2));
 
-    public async Task<JobRecord> CreateAsync(Stream input, bool dereverb, CancellationToken token)
+    public async Task<JobCreateResult> CreateAsync(Stream input, bool dereverb, CancellationToken token)
     {
         await _createGate.WaitAsync(token);
         try { return await CreateCoreAsync(input, dereverb, token); }
         finally { _createGate.Release(); }
     }
 
-    private async Task<JobRecord> CreateCoreAsync(Stream input, bool dereverb, CancellationToken token)
+    private async Task<JobCreateResult> CreateCoreAsync(Stream input, bool dereverb, CancellationToken token)
     {
         Directory.CreateDirectory(_root);
-        if (CountActive() >= _maxPending)
-            throw new BadHttpRequestException("Warteschlange voll. Später erneut versuchen.", 429);
+        if (CountActive() >= _maxPending) return new(JobCreateStatus.QueueFull, null);
         var job = new JobRecord { Id = Guid.NewGuid(), Dereverb = dereverb };
         var dir = Path.Combine(_root, job.Id.ToString("D"));
         Directory.CreateDirectory(dir);
@@ -38,14 +41,19 @@ public sealed class JobStore(IConfiguration configuration)
         {
             var source = Path.Combine(dir, "input.flac");
             await using (var file = File.Create(source)) await input.CopyToAsync(file, token);
+            bool valid;
             await using (var file = File.OpenRead(source))
             {
                 var header = new byte[4];
-                if (await file.ReadAsync(header, token) != 4 || !header.AsSpan().SequenceEqual("fLaC"u8))
-                    throw new BadHttpRequestException("Ungültige FLAC-Datei.", 400);
+                valid = await file.ReadAsync(header, token) == 4 && header.AsSpan().SequenceEqual("fLaC"u8);
+            }
+            if (!valid)
+            {
+                Directory.Delete(dir, true);
+                return new(JobCreateStatus.InvalidFlac, null);
             }
             Save(job);
-            return job;
+            return new(JobCreateStatus.Created, job);
         }
         catch { Directory.Delete(dir, true); throw; }
     }
@@ -82,11 +90,11 @@ public sealed class JobStore(IConfiguration configuration)
     {
         job.UpdatedUtc = DateTimeOffset.UtcNow;
         var dir = Path.Combine(_root, job.Id.ToString("D"));
-        Directory.CreateDirectory(dir);
         var target = Path.Combine(dir, "job.json");
         var temp = target + ".tmp";
         lock (_sync)
         {
+            if (!Directory.Exists(dir)) return;
             File.WriteAllText(temp, JsonSerializer.Serialize(job));
             File.Move(temp, target, true);
         }
@@ -97,12 +105,13 @@ public sealed class JobStore(IConfiguration configuration)
 
     public void RemoveInput(Guid id) => File.Delete(InputPath(id));
 
-    public bool DeleteTerminal(Guid id)
+    /// <summary>Entfernt einen Auftrag, sofern der Worker ihn nicht gerade überträgt.</summary>
+    public bool Delete(Guid id)
     {
         lock (_sync)
         {
             var job = Read(id);
-            if (job is null || job.Status is not ("completed" or "failed")) return false;
+            if (job is null || job.Status == "processing") return false;
             Directory.Delete(Path.Combine(_root, id.ToString("D")), true);
             return true;
         }
@@ -116,7 +125,8 @@ public sealed class JobStore(IConfiguration configuration)
         {
             if (Guid.TryParse(Path.GetFileName(dir), out var id) && Read(id) is { } job &&
                 job.Status is "completed" or "failed" && job.UpdatedUtc < cutoff)
-                Directory.Delete(dir, true);
+                lock (_sync)
+                    if (Directory.Exists(dir)) Directory.Delete(dir, true);
         }
     }
 }

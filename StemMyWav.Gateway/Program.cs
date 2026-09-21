@@ -68,12 +68,22 @@ app.MapPost("/api/jobs", async (HttpContext context, JobStore store, bool? derev
 {
     if (context.Request.ContentType is not ("audio/flac" or "audio/x-flac"))
         return Results.Problem("Content-Type muss audio/flac sein.", statusCode: 415);
-    var job = await store.CreateAsync(context.Request.Body, dereverb == true, context.RequestAborted);
-    return Results.Accepted($"/api/jobs/{job.Id}", new { job.Id, job.Status });
+    var result = await store.CreateAsync(context.Request.Body, dereverb == true, context.RequestAborted);
+    switch (result.Status)
+    {
+        case JobCreateStatus.InvalidFlac:
+            return Results.Problem("Ungültige FLAC-Datei.", statusCode: 400);
+        case JobCreateStatus.QueueFull:
+            context.Response.Headers.RetryAfter = "60";
+            return Results.Problem("Warteschlange voll. Später erneut versuchen.", statusCode: 429);
+        default:
+            var job = result.Job!;
+            return Results.Accepted($"/api/jobs/{job.Id}", new { job.Id, job.Status });
+    }
 })
     .WithName("CreateSeparationJob")
     .WithSummary("Nimmt eine FLAC-Datei zur Stem-Separation an")
-    .WithDescription("Der Request-Body ist die rohe FLAC-Datei, kein Multipart-Formular. dereverb=true erzeugt zusätzlich trockenen Gesang und Hall. Die Location-Antwort zeigt auf den Job-Status. Maximal 512 MiB.")
+    .WithDescription("Der Request-Body ist die rohe FLAC-Datei, kein Multipart-Formular. dereverb=true erzeugt zusätzlich trockenen Gesang und, sofern das Modell ihn ausgibt, den Hallanteil. Die Location-Antwort zeigt auf den Job-Status. Maximal 512 MiB. Bei voller Warteschlange nennt Retry-After den Abstand bis zum nächsten Versuch.")
     .Accepts<Stream>("audio/flac")
     .Produces<JobAcceptedResponse>(StatusCodes.Status202Accepted)
     .ProducesProblem(StatusCodes.Status400BadRequest)
@@ -96,11 +106,18 @@ app.MapGet("/api/jobs/{id:guid}/result", (Guid id, JobStore store) =>
     var job = store.Read(id);
     if (job is null) return Results.NotFound();
     if (job.Status != "completed") return Results.Problem("Ergebnis noch nicht verfügbar.", statusCode: 409);
-    return Results.File(store.ResultPath(id), "application/zip", "stems.zip");
+    try
+    {
+        return Results.File(File.OpenRead(store.ResultPath(id)), "application/zip", "stems.zip");
+    }
+    catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+    {
+        return Results.NotFound();
+    }
 })
     .WithName("DownloadSeparationResult")
     .WithSummary("Lädt das Ergebnis-ZIP herunter")
-    .WithDescription("Enthält 48-kHz-/16-Bit-Stereo-WAVs: vocals.wav und instrumental.wav; bei dereverb=true zusätzlich vocals_dry.wav und vocals_reverb.wav. Erst nach erfolgreichem Speichern und Importieren DELETE aufrufen.")
+    .WithDescription("Enthält 48-kHz-/16-Bit-Stereo-WAVs: vocals.wav und instrumental.wav; bei dereverb=true zusätzlich vocals_dry.wav und, sofern das Modell ihn ausgibt, vocals_reverb.wav. Erst nach erfolgreichem Speichern und Importieren DELETE aufrufen.")
     .Produces<Stream>(StatusCodes.Status200OK, "application/zip")
     .Produces(StatusCodes.Status401Unauthorized)
     .Produces(StatusCodes.Status404NotFound)
@@ -109,13 +126,16 @@ app.MapDelete("/api/jobs/{id:guid}", (Guid id, JobStore store) =>
 {
     var job = store.Read(id);
     if (job is null) return Results.NotFound();
-    if (job.Status is "queued" or "processing")
-        return Results.Problem("Auftrag wird noch verarbeitet.", statusCode: 409);
-    return store.DeleteTerminal(id) ? Results.NoContent() : Results.NotFound();
+    if (job.Status == "processing")
+        return Results.Problem("Auftrag wird gerade übertragen.", statusCode: 409);
+    if (store.Delete(id)) return Results.NoContent();
+    return store.Read(id) is null
+        ? Results.NotFound()
+        : Results.Problem("Auftrag wird gerade übertragen.", statusCode: 409);
 })
     .WithName("DeleteSeparationJob")
-    .WithSummary("Bestätigt den Import und löscht das Ergebnis")
-    .WithDescription("Nur für completed oder failed. Nach erfolgreichem Import aufrufen; ZIP und Job-Status werden sofort entfernt. Aktive Jobs können nicht gelöscht werden.")
+    .WithSummary("Bestätigt den Import oder bricht einen wartenden Auftrag ab")
+    .WithDescription("Nach erfolgreichem Import aufrufen; ZIP und Job-Status werden sofort entfernt. Ein noch wartender Auftrag (queued) wird damit abgebrochen und gibt seinen Platz in der Warteschlange frei. Nur während der laufenden Übertragung zum Mac (processing) ist das Löschen gesperrt.")
     .Produces(StatusCodes.Status204NoContent)
     .Produces(StatusCodes.Status401Unauthorized)
     .Produces(StatusCodes.Status404NotFound)
