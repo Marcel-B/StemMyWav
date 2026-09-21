@@ -1,4 +1,4 @@
-"""Gateway integration test using a transiently failing local Mac API stub."""
+"""Gateway integration tests using local Mac API stubs."""
 
 import io
 import json
@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -27,6 +28,11 @@ def free_port():
 
 
 def request(url, method="GET", body=None, key=None, content_type=None):
+    status, payload, _ = request_full(url, method, body, key, content_type)
+    return status, payload
+
+
+def request_full(url, method="GET", body=None, key=None, content_type=None):
     headers = {}
     if key is not None:
         headers["X-Api-Key"] = key
@@ -35,9 +41,49 @@ def request(url, method="GET", body=None, key=None, content_type=None):
     call = Request(url, data=body, headers=headers, method=method)
     try:
         with urlopen(call, timeout=5) as response:
-            return response.status, response.read()
+            return response.status, response.read(), response.headers
     except HTTPError as error:
-        return error.code, error.read()
+        return error.code, error.read(), error.headers
+
+
+@contextmanager
+def run_gateway(handler, **settings):
+    """Runs the gateway against a stub Mac API and yields its base URL and data directory."""
+    with tempfile.TemporaryDirectory() as work:
+        path = Path(work)
+        (path / "gateway-key").write_text("gateway-test-key\n")
+        (path / "mac-key").write_text("mac-test-key\n")
+        mac_port, gateway_port = free_port(), free_port()
+        mac = ThreadingHTTPServer(("127.0.0.1", mac_port), handler)
+        threading.Thread(target=mac.serve_forever, daemon=True).start()
+        env = os.environ.copy()
+        env.update({
+            "ASPNETCORE_ENVIRONMENT": "Development",
+            "ASPNETCORE_URLS": f"http://127.0.0.1:{gateway_port}",
+            "Gateway__ApiKeyFile": str(path / "gateway-key"),
+            "Gateway__DataDirectory": str(path / "data"),
+            "MacBackend__Url": f"http://127.0.0.1:{mac_port}",
+            "MacBackend__ApiKeyFile": str(path / "mac-key"),
+        })
+        env.update(settings)
+        process = subprocess.Popen(["dotnet", str(GATEWAY)], cwd=ROOT, env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        base = f"http://127.0.0.1:{gateway_port}"
+        try:
+            for _ in range(50):
+                try:
+                    if request(base + "/health")[0] == 200:
+                        break
+                except URLError:
+                    time.sleep(0.1)
+            else:
+                raise AssertionError("Gateway did not start")
+            yield base, path / "data"
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
+            mac.shutdown()
+            mac.server_close()
 
 
 class MacStub(BaseHTTPRequestHandler):
@@ -150,6 +196,88 @@ class GatewayIntegrationTest(unittest.TestCase):
                 gateway.wait(timeout=10)
                 mac.shutdown()
                 mac.server_close()
+
+
+class UnauthorizedStub(BaseHTTPRequestHandler):
+    """Stands in for a Mac whose API key no longer matches the gateway configuration."""
+
+    attempts = 0
+
+    def do_POST(self):
+        self.__class__.attempts += 1
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(401)
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+
+class QueueRecoveryTest(unittest.TestCase):
+    def test_rejected_key_is_retried_instead_of_discarding_the_upload(self):
+        UnauthorizedStub.attempts = 0
+        with run_gateway(UnauthorizedStub) as (base, data):
+            status, payload = request(base + "/api/jobs", "POST", b"fLaCtest", "gateway-test-key", "audio/flac")
+            self.assertEqual(202, status)
+            job_id = json.loads(payload)["id"]
+
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and UnauthorizedStub.attempts < 1:
+                time.sleep(0.25)
+            time.sleep(1)
+            status, payload = request(base + f"/api/jobs/{job_id}", key="gateway-test-key")
+            self.assertEqual("queued", json.loads(payload)["status"])
+            self.assertTrue((data / job_id / "input.flac").exists())
+
+    def test_queue_full_reports_problem_json_and_a_cancelled_job_frees_the_slot(self):
+        UnauthorizedStub.attempts = 0
+        with run_gateway(UnauthorizedStub, Gateway__MaxPendingJobs="1") as (base, _data):
+            # Die Kapazitätsprüfung greift bewusst vor dem Lesen des Bodys, deshalb wird die
+            # FLAC-Prüfung geprüft, solange die Warteschlange noch frei ist.
+            status, payload, headers = request_full(base + "/api/jobs", "POST", b"invalid",
+                                                    "gateway-test-key", "audio/flac")
+            self.assertEqual(400, status)
+            self.assertEqual("application/problem+json", headers["Content-Type"].split(";")[0])
+            self.assertEqual("Ungültige FLAC-Datei.", json.loads(payload)["detail"])
+
+            status, payload = request(base + "/api/jobs", "POST", b"fLaCtest", "gateway-test-key", "audio/flac")
+            self.assertEqual(202, status)
+            job_id = json.loads(payload)["id"]
+
+            status, payload, headers = request_full(base + "/api/jobs", "POST", b"fLaCtest",
+                                                    "gateway-test-key", "audio/flac")
+            self.assertEqual(429, status)
+            self.assertEqual("60", headers["Retry-After"])
+            self.assertEqual("application/problem+json", headers["Content-Type"].split(";")[0])
+            self.assertEqual(429, json.loads(payload)["status"])
+
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if request(base + f"/api/jobs/{job_id}", "DELETE", key="gateway-test-key")[0] == 204:
+                    break
+                time.sleep(0.25)
+            else:
+                self.fail("Queued job could not be cancelled")
+
+            self.assertEqual(202, request(base + "/api/jobs", "POST", b"fLaCtest",
+                                          "gateway-test-key", "audio/flac")[0])
+
+    def test_unreachable_mac_eventually_fails_the_job(self):
+        UnauthorizedStub.attempts = 0
+        with run_gateway(UnauthorizedStub, Gateway__MaxQueueHours="0.002") as (base, data):
+            status, payload = request(base + "/api/jobs", "POST", b"fLaCtest", "gateway-test-key", "audio/flac")
+            job_id = json.loads(payload)["id"]
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                job = json.loads(request(base + f"/api/jobs/{job_id}", key="gateway-test-key")[1])
+                if job["status"] == "failed":
+                    break
+                time.sleep(0.25)
+            else:
+                self.fail("Job never gave up")
+            self.assertIn("nicht erreichbar", job["lastError"])
+            self.assertFalse((data / job_id / "input.flac").exists())
+            self.assertEqual(204, request(base + f"/api/jobs/{job_id}", "DELETE", key="gateway-test-key")[0])
 
 
 if __name__ == "__main__":
