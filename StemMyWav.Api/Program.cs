@@ -123,14 +123,23 @@ public sealed class SeparatorService(IConfiguration config)
             var archive = Path.Combine(work, "stems.zip");
             using (var zip = ZipFile.Open(archive, ZipArchiveMode.Create))
             {
-                zip.CreateEntryFromFile(vocals, "vocals.wav", CompressionLevel.NoCompression);
-                zip.CreateEntryFromFile(instrumental, "instrumental.wav", CompressionLevel.NoCompression);
-                if (dryVocals is not null) zip.CreateEntryFromFile(dryVocals, "vocals_dry.wav", CompressionLevel.NoCompression);
-                if (reverb is not null) zip.CreateEntryFromFile(reverb, "vocals_reverb.wav", CompressionLevel.NoCompression);
+                await AddStemAsync(zip, vocals, "vocals.wav", work, token);
+                await AddStemAsync(zip, instrumental, "instrumental.wav", work, token);
+                if (dryVocals is not null) await AddStemAsync(zip, dryVocals, "vocals_dry.wav", work, token);
+                if (reverb is not null) await AddStemAsync(zip, reverb, "vocals_reverb.wav", work, token);
             }
             return archive;
         }
         finally { _gate.Release(); }
+    }
+
+    private static async Task AddStemAsync(ZipArchive zip, string source, string name, string work, CancellationToken token)
+    {
+        var converted = Path.Combine(work, name);
+        await ExecAsync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", source,
+            "-map", "0:a:0", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", converted], token);
+        zip.CreateEntryFromFile(converted, name, CompressionLevel.NoCompression);
+        File.Delete(converted);
     }
 
     private static async Task<string> ExecAsync(string executable, string[] args, CancellationToken token)

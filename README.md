@@ -1,6 +1,6 @@
 # StemMyWav
 
-StemMyWav trennt eine YuE-FLAC in WAV-Stems. Optional entfernt ein zweites MLX-Modell Hall aus dem Gesang.
+StemMyWav trennt eine YuE-FLAC in 48-kHz-/16-Bit-Stereo-WAV-Stems. Optional entfernt ein zweites MLX-Modell Hall aus dem Gesang.
 
 ## Architektur
 
@@ -87,4 +87,4 @@ Bei dieser Einstellung den OpenAPI-Export und den Health-Check über `http://192
 
 ## Modelle und Konfiguration
 
-Die Mac-API verwendet `model_bs_roformer_ep_317_sdr_12.9755.ckpt` zur Vocal-Separation und `dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt` für optionales De-Reverb. Sie können mit `Separator__Model` und `Separator__DereverbModel` geändert werden. `Separator__Executable` legt den Pfad zur MLX-CLI fest, `Separator__ModelDirectory` den Modell-Cache. Eingaben mit anderer Abtastrate oder Kanalzahl werden vor MLX als Stereo-FLAC bei 44,1 kHz vorbereitet.
+Die Mac-API verwendet `model_bs_roformer_ep_317_sdr_12.9755.ckpt` zur Vocal-Separation und `dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt` für optionales De-Reverb. Sie können mit `Separator__Model` und `Separator__DereverbModel` geändert werden. `Separator__Executable` legt den Pfad zur MLX-CLI fest, `Separator__ModelDirectory` den Modell-Cache. Eingaben mit anderer Abtastrate oder Kanalzahl werden vor MLX als Stereo-FLAC bei 44,1 kHz vorbereitet. Alle Ergebnis-Stems werden anschließend mit FFmpeg auf 48 kHz, 16 Bit und Stereo konvertiert.

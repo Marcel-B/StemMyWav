@@ -100,7 +100,7 @@ app.MapGet("/api/jobs/{id:guid}/result", (Guid id, JobStore store) =>
 })
     .WithName("DownloadSeparationResult")
     .WithSummary("Lädt das Ergebnis-ZIP herunter")
-    .WithDescription("Enthält vocals.wav und instrumental.wav; bei dereverb=true zusätzlich vocals_dry.wav und vocals_reverb.wav. Erst nach erfolgreichem Speichern und Importieren DELETE aufrufen.")
+    .WithDescription("Enthält 48-kHz-/16-Bit-Stereo-WAVs: vocals.wav und instrumental.wav; bei dereverb=true zusätzlich vocals_dry.wav und vocals_reverb.wav. Erst nach erfolgreichem Speichern und Importieren DELETE aufrufen.")
     .Produces<Stream>(StatusCodes.Status200OK, "application/zip")
     .Produces(StatusCodes.Status401Unauthorized)
     .Produces(StatusCodes.Status404NotFound)
