@@ -9,7 +9,7 @@ services:
     volumes:
       - stemmywav-data:/data
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${STEMMYWAV_GATEWAY_BIND:-127.0.0.1}:8080:8080"
     networks:
       - stemmywav
 

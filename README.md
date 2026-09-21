@@ -74,13 +74,16 @@ Der Gateway stellt den maschinenlesbaren Vertrag unter `/openapi/v1.json` und Sw
 curl -fsS http://127.0.0.1:8080/openapi/v1.json > stemmywav-openapi.json
 ```
 
-Compose bindet Port 8080 nur an `127.0.0.1` des CT. Für Swagger UI auf einem anderen Rechner einen SSH-Tunnel zum CT öffnen und danach `http://127.0.0.1:8080/swagger` im Browser aufrufen:
+Compose bindet Port 8080 standardmäßig nur an `127.0.0.1` des CT. Für Swagger UI auf einem anderen Rechner kann ein SSH-Tunnel zum CT geöffnet und danach `http://127.0.0.1:8080/swagger` im Browser aufgerufen werden:
 
 ```sh
 ssh -L 8080:127.0.0.1:8080 root@stem
 ```
 
 Die API selbst bleibt für YuE_To_Logic im Docker-Netz unter `http://stemmywav:8080` erreichbar. In Swagger UI lässt sich der Gateway-Schlüssel über **Authorize** für Testaufrufe setzen.
+
+Soll ein Reverse Proxy auf einem anderen LAN-Rechner (`stem.idsrv.info`) den Gateway erreichen, in der `.env` auf dem CT `STEMMYWAV_GATEWAY_BIND` auf dessen LAN-Adresse setzen, z. B. `192.168.2.74`. Der Proxy muss dann per HTTP auf `192.168.2.74:8080` weiterleiten. Diese Bindung macht die gesamte Gateway-API im LAN erreichbar; API-Aufrufe unter `/api` erfordern weiterhin `X-Api-Key`. Schlüsselwerte stehen weder in Swagger UI noch im OpenAPI-Dokument.
+Bei dieser Einstellung den OpenAPI-Export und den Health-Check über `http://192.168.2.74:8080` statt über `127.0.0.1` aufrufen.
 
 ## Modelle und Konfiguration
 
