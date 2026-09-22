@@ -11,9 +11,12 @@ public sealed class SeparatorOptions
     [Required]
     public string Executable { get; set; } = "mlx-audio-separator";
 
-    [Required]
-    public string Model { get; set; } = "model_bs_roformer_ep_317_sdr_12.9755.ckpt";
+    /// <summary>Kennung aus models.json für Anfragen ohne model-Parameter. Leer bedeutet die
+    /// Voreinstellung des Katalogs. Eine unbekannte Kennung bricht den Start ab.</summary>
+    public string? DefaultModel { get; set; }
 
+    /// <summary>Das De-Reverb-Modell steht nicht im Katalog: es ist keine Wahl des Aufrufers,
+    /// sondern der Nachbearbeitungsschritt hinter dereverb=true.</summary>
     [Required]
     public string DereverbModel { get; set; } = "dereverb_mel_band_roformer_anvuew_sdr_19.1729.ckpt";
 

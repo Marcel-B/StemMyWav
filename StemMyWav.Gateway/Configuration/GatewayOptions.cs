@@ -15,6 +15,10 @@ public sealed class GatewayOptions
     [Required]
     public string? ApiKey { get; set; }
 
+    /// <summary>Kennung aus models.json für Aufträge ohne model-Parameter. Leer bedeutet die
+    /// Voreinstellung des Katalogs. Eine unbekannte Kennung bricht den Start ab.</summary>
+    public string? DefaultModel { get; set; }
+
     /// <summary>Wie viele Aufträge gleichzeitig warten oder laufen dürfen.</summary>
     [Range(1, 100)]
     public int MaxPendingJobs { get; set; } = 2;

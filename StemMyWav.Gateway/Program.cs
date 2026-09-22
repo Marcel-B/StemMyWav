@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using StemMyWav.Gateway.Catalog;
 using StemMyWav.Gateway.Http;
 using StemMyWav.Gateway.Configuration;
 using StemMyWav.Gateway.Jobs;
@@ -24,12 +25,17 @@ builder.Services.AddOptions<MacBackendOptions>()
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
+builder.Services.AddSingleton(ModelCatalog.Load());
 builder.Services.AddSingleton<JobStore>();
 builder.Services.AddHttpClient("mac", client => client.Timeout = TimeSpan.FromMinutes(30));
 builder.Services.AddHostedService<JobWorker>();
 builder.Services.AddOpenApi(options => options.AddDocumentTransformer<GatewayDocumentTransformer>());
 
 var app = builder.Build();
+
+// Eine unbekannte Voreinstellung soll den Start abbrechen und nicht erst beim ersten Auftrag auffallen.
+app.Services.GetRequiredService<ModelCatalog>()
+    .ResolveDefault(app.Services.GetRequiredService<IOptions<GatewayOptions>>().Value.DefaultModel);
 
 app.UseApiKey(app.Services.GetRequiredService<IOptions<GatewayOptions>>().Value.ApiKey!);
 app.MapOpenApi();

@@ -95,7 +95,7 @@ class MacStub(BaseHTTPRequestHandler):
         assert self.headers["X-Api-Key"] == "mac-test-key"
         assert self.headers["Content-Type"] == "audio/flac"
         assert body.startswith(b"fLaC")
-        assert self.path == "/api/separate?dereverb=true"
+        assert self.path == "/api/separate?model=mdx-net-voc-ft&dereverb=true"
         if self.__class__.attempts == 1:
             self.send_response(503)
             self.end_headers()
@@ -162,15 +162,24 @@ class GatewayIntegrationTest(unittest.TestCase):
                 self.assertEqual("#/components/schemas/JobStatus",
                                  specification["components"]["schemas"]["JobStatusResponse"]["properties"]["status"]["$ref"])
                 self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs"]["post"]["requestBody"]["content"]["audio/flac"]["schema"]["$ref"])
+                self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs"]["post"]["requestBody"]["content"]["audio/wav"]["schema"]["$ref"])
+                self.assertEqual({"GatewayApiKey": []}, specification["paths"]["/api/models"]["get"]["security"][0])
+                self.assertEqual(["fast", "moderate", "slow", "verySlow"],
+                                 specification["components"]["schemas"]["ModelSpeed"]["enum"])
+                self.assertEqual("#/components/schemas/ModelSpeed",
+                                 specification["components"]["schemas"]["ModelResponse"]["properties"]["speed"]["$ref"])
                 self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs/{id}/result"]["get"]["responses"]["200"]["content"]["application/zip"]["schema"]["$ref"])
                 self.assertEqual({"GatewayApiKey": []}, specification["paths"]["/api/jobs"]["get"]["security"][0])
                 self.assertEqual(200, request(base + "/swagger/index.html")[0])
 
                 self.assertEqual(401, request(base + "/api/jobs/00000000-0000-0000-0000-000000000000")[0])
                 self.assertEqual(400, request(base + "/api/jobs", "POST", b"invalid", "gateway-test-key", "audio/flac")[0])
-                status, payload = request(base + "/api/jobs?dereverb=true", "POST", b"fLaCtest", "gateway-test-key", "audio/flac")
+                status, payload = request(base + "/api/jobs?model=mdx-net-voc-ft&dereverb=true", "POST",
+                                          b"fLaCtest", "gateway-test-key", "audio/flac")
                 self.assertEqual(202, status)
-                job_id = json.loads(payload)["id"]
+                accepted = json.loads(payload)
+                self.assertEqual("mdx-net-voc-ft", accepted["model"])
+                job_id = accepted["id"]
                 self.assertTrue((path / "data" / job_id / "input.flac").exists())
 
                 deadline = time.monotonic() + 50
@@ -186,6 +195,8 @@ class GatewayIntegrationTest(unittest.TestCase):
                     self.fail("Job did not recover from transient Mac error")
 
                 self.assertEqual(2, job["attempts"])
+                self.assertEqual("mdx-net-voc-ft", job["model"])
+                self.assertEqual(["vocals", "instrumental"], job["stems"])
                 self.assertEqual(2, MacStub.attempts)
                 self.assertFalse((path / "data" / job_id / "input.flac").exists())
                 status, payload = request(base + f"/api/jobs/{job_id}/result", key="gateway-test-key")
@@ -358,6 +369,128 @@ class QueueRecoveryTest(unittest.TestCase):
             self.assertIn("nicht erreichbar", job["lastError"])
             self.assertFalse((data / job_id / "input.flac").exists())
             self.assertEqual(204, request(base + f"/api/jobs/{job_id}", "DELETE", key="gateway-test-key")[0])
+
+
+class SixStemStub(BaseHTTPRequestHandler):
+    """Stands in for a Mac running a six stem model on a WAV upload."""
+
+    seen = []
+    stems = ("vocals.wav", "drums.wav", "bass.wav", "guitar.wav", "piano.wav", "other.wav")
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        self.__class__.seen.append((self.path, self.headers["Content-Type"], body[:4]))
+        stream = io.BytesIO()
+        with ZipFile(stream, "w") as archive:
+            for name in self.__class__.stems:
+                archive.writestr(name, b"RIFFtest")
+        payload = stream.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_args):
+        pass
+
+
+def wait_for_status(test, base, job_id, wanted, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = json.loads(request(base + f"/api/jobs/{job_id}", key="gateway-test-key")[1])
+        if job["status"] == wanted:
+            return job
+        time.sleep(0.25)
+    test.fail(f"Job never reached {wanted}; last status was {job['status']}")
+
+
+class ModelSelectionTest(unittest.TestCase):
+    def test_catalog_is_served_from_the_gateway_itself(self):
+        # Ohne den Mac zu fragen: die Liste muss auch dann stehen, wenn er gerade aus ist.
+        with run_gateway(UnauthorizedStub) as (base, _data):
+            self.assertEqual(401, request(base + "/api/models")[0])
+            status, payload = request(base + "/api/models", key="gateway-test-key")
+            self.assertEqual(200, status)
+            models = json.loads(payload)
+            self.assertGreater(len(models), 1)
+
+            by_id = {model["id"]: model for model in models}
+            self.assertEqual(1, sum(1 for model in models if model["isDefault"]))
+            self.assertIn("mdx-net-voc-ft", by_id)
+            self.assertEqual(["vocals", "instrumental"], by_id["mdx-net-voc-ft"]["stems"])
+            self.assertEqual("fast", by_id["mdx-net-voc-ft"]["speed"])
+            self.assertEqual("verySlow", by_id["bs-roformer-viperx-1297"]["speed"])
+            self.assertEqual(6, len(by_id["htdemucs-6s"]["stems"]))
+            for model in models:
+                self.assertIn(model["speed"], {"fast", "moderate", "slow", "verySlow"})
+                # Der Dateiname der Modelldatei ist Sache des Macs und gehört nicht nach außen.
+                self.assertNotIn("filename", model)
+
+    def test_an_unknown_model_is_refused_before_the_upload_is_queued(self):
+        with run_gateway(UnauthorizedStub) as (base, data):
+            status, payload, headers = request_full(base + "/api/jobs?model=gibt-es-nicht", "POST",
+                                                    b"fLaCtest", "gateway-test-key", "audio/flac")
+            self.assertEqual(400, status)
+            self.assertEqual("application/problem+json", headers["Content-Type"].split(";")[0])
+            self.assertIn("/api/models", json.loads(payload)["detail"])
+            self.assertEqual([], json.loads(request(base + "/api/jobs", key="gateway-test-key")[1]))
+            self.assertFalse(any(data.glob("*/input.*")) if data.exists() else False)
+
+    def test_dereverb_is_refused_for_a_model_without_a_vocal_stem(self):
+        with run_gateway(UnauthorizedStub) as (base, _data):
+            status, payload = request(base + "/api/jobs?model=mdx23c-drumsep&dereverb=true", "POST",
+                                      b"fLaCtest", "gateway-test-key", "audio/flac")
+            self.assertEqual(400, status)
+            self.assertIn("Gesangs-Stem", json.loads(payload)["detail"])
+
+    def test_a_wav_upload_runs_through_a_six_stem_model(self):
+        SixStemStub.seen = []
+        SixStemStub.stems = ("vocals.wav", "drums.wav", "bass.wav", "guitar.wav", "piano.wav", "other.wav")
+        with run_gateway(SixStemStub) as (base, data):
+            self.assertEqual(415, request(base + "/api/jobs", "POST", b"fLaCtest",
+                                          "gateway-test-key", "audio/mpeg")[0])
+            self.assertEqual(400, request(base + "/api/jobs", "POST", b"RIFF----NOPE",
+                                          "gateway-test-key", "audio/wav")[0])
+
+            body = b"RIFF\x00\x00\x00\x00WAVEfmt "
+            status, payload = request(base + "/api/jobs?model=htdemucs-6s", "POST", body,
+                                      "gateway-test-key", "audio/wav")
+            self.assertEqual(202, status)
+            job_id = json.loads(payload)["id"]
+            # Die Endung bleibt erhalten, damit der Mac die Datei nicht als FLAC lesen muss.
+            self.assertTrue((data / job_id / "input.wav").exists())
+
+            job = wait_for_status(self, base, job_id, "completed")
+            self.assertEqual("htdemucs-6s", job["model"])
+            self.assertEqual(["vocals", "drums", "bass", "guitar", "piano", "other"], job["stems"])
+
+            path, content_type, magic = SixStemStub.seen[0]
+            self.assertEqual("/api/separate?model=htdemucs-6s&dereverb=false", path)
+            self.assertEqual("audio/wav", content_type)
+            self.assertEqual(b"RIFF", magic)
+
+            payload = request(base + f"/api/jobs/{job_id}/result", key="gateway-test-key")[1]
+            with ZipFile(io.BytesIO(payload)) as archive:
+                self.assertEqual(set(SixStemStub.stems), set(archive.namelist()))
+
+    def test_a_result_missing_a_stem_of_the_chosen_model_is_not_accepted(self):
+        # Der Gateway prüft gegen den Katalog: vier von sechs Stems sind kein fertiges Ergebnis.
+        SixStemStub.seen = []
+        SixStemStub.stems = ("vocals.wav", "drums.wav", "bass.wav", "other.wav")
+        with run_gateway(SixStemStub) as (base, _data):
+            status, payload = request(base + "/api/jobs?model=htdemucs-6s", "POST",
+                                      b"RIFF\x00\x00\x00\x00WAVEfmt ", "gateway-test-key", "audio/wav")
+            self.assertEqual(202, status)
+            job_id = json.loads(payload)["id"]
+
+            job = wait_for_status(self, base, job_id, "queued")
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not job["lastError"]:
+                time.sleep(0.25)
+                job = json.loads(request(base + f"/api/jobs/{job_id}", key="gateway-test-key")[1])
+            self.assertNotEqual("completed", job["status"])
+            self.assertIsNotNone(job["lastError"])
 
 
 if __name__ == "__main__":

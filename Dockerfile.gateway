@@ -1,5 +1,6 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
+COPY models.json .
 COPY StemMyWav.Gateway/StemMyWav.Gateway.csproj StemMyWav.Gateway/
 RUN dotnet restore StemMyWav.Gateway/StemMyWav.Gateway.csproj
 COPY StemMyWav.Gateway/ StemMyWav.Gateway/
