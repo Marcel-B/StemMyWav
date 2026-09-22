@@ -61,12 +61,9 @@ public sealed class SeparatorService(IProcessRunner runner, IOptions<SeparatorOp
     /// <summary>MLX erwartet Stereo bei 44,1 kHz; alles andere wird vorher umgerechnet.</summary>
     private async Task<string> PrepareAsync(string source, string work, CancellationToken token)
     {
-        var probe = await runner.RunAsync("ffprobe",
-            ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json", source],
-            token);
-        using var json = JsonDocument.Parse(probe);
-        var audio = json.RootElement.GetProperty("streams")[0];
-        if (audio.GetProperty("codec_name").GetString() != "flac") throw new InvalidDataException("Input is not FLAC.");
+        var audio = await ProbeAsync(source, token);
+        if (audio.GetProperty("codec_name").GetString() != "flac")
+            throw new UnreadableInputException("Die Datei enthält keinen FLAC-Audiostrom.");
         if (audio.GetProperty("sample_rate").GetString() == "44100" && audio.GetProperty("channels").GetInt32() == 2)
             return source;
 
@@ -75,6 +72,37 @@ public sealed class SeparatorService(IProcessRunner runner, IOptions<SeparatorOp
             ["-hide_banner", "-loglevel", "error", "-i", source, "-vn", "-ac", "2", "-ar", "44100", "-c:a", "flac", prepared],
             token);
         return prepared;
+    }
+
+    private const string Unreadable = "Die Datei ließ sich nicht lesen; sie ist vermutlich unvollständig oder beschädigt.";
+
+    /// <summary>Liest den ersten Audiostrom. Scheitert ffprobe, ist die Datei unbrauchbar —
+    /// etwa abgeschnitten — und nicht der Dienst gestört.</summary>
+    private async Task<JsonElement> ProbeAsync(string source, CancellationToken token)
+    {
+        string probe;
+        try
+        {
+            probe = await runner.RunAsync("ffprobe",
+                ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json", source],
+                token);
+        }
+        catch (InvalidOperationException error)
+        {
+            throw new UnreadableInputException(Unreadable, error);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(probe);
+            var streams = document.RootElement.GetProperty("streams");
+            if (streams.GetArrayLength() == 0) throw new UnreadableInputException("Die Datei enthält keine Audiospur.");
+            return streams[0].Clone();
+        }
+        catch (Exception error) when (error is JsonException or KeyNotFoundException)
+        {
+            throw new UnreadableInputException(Unreadable, error);
+        }
     }
 
     private Task SeparateWithModelAsync(string input, string model, string output, CancellationToken token)

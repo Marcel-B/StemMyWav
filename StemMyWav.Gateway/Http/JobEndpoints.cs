@@ -24,6 +24,13 @@ public static class JobEndpoints
             .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .Produces(StatusCodes.Status401Unauthorized);
 
+        routes.MapGet("/api/jobs", ListJobs)
+            .WithName("ListSeparationJobs")
+            .WithSummary("Listet alle bekannten Aufträge")
+            .WithDescription("Jüngste zuerst. Zeigt auch Aufträge, die die Warteschlange belegen, damit ein hängender Auftrag gefunden und mit DELETE abgebrochen werden kann.")
+            .Produces<IReadOnlyList<JobStatusResponse>>()
+            .Produces(StatusCodes.Status401Unauthorized);
+
         routes.MapGet("/api/jobs/{id:guid}", ReadJob)
             .WithName("GetSeparationJob")
             .WithSummary("Liefert den Job-Status")
@@ -73,10 +80,14 @@ public static class JobEndpoints
         return Results.Accepted($"/api/jobs/{job.Id}", new JobAcceptedResponse(job.Id, job.Status));
     }
 
+    private static IResult ListJobs(JobStore store) =>
+        Results.Ok(store.All().Select(Describe).ToList());
+
+    private static JobStatusResponse Describe(JobRecord job) =>
+        new(job.Id, job.Status, job.Attempts, job.LastError, job.CreatedUtc, job.UpdatedUtc);
+
     private static IResult ReadJob(Guid id, JobStore store) =>
-        store.Read(id) is { } job
-            ? Results.Ok(new JobStatusResponse(job.Id, job.Status, job.Attempts, job.LastError, job.CreatedUtc, job.UpdatedUtc))
-            : Results.NotFound();
+        store.Read(id) is { } job ? Results.Ok(Describe(job)) : Results.NotFound();
 
     private static IResult DownloadResult(Guid id, JobStore store)
     {

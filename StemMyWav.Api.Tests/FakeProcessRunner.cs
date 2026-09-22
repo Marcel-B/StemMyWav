@@ -10,6 +10,9 @@ internal sealed class FakeProcessRunner : IProcessRunner
 
     public string ProbeResult { get; set; } = Probe("flac", "44100", 2);
 
+    /// <summary>Lässt ffprobe scheitern, so wie bei einer abgeschnittenen Datei.</summary>
+    public string? ProbeFailure { get; set; }
+
     /// <summary>Die Marker, die der Separator je Modell in den Ausgabeordner schreibt.</summary>
     public Func<string, string[]> StemsFor { get; set; } =
         model => model.Contains("dereverb", StringComparison.OrdinalIgnoreCase)
@@ -27,7 +30,10 @@ internal sealed class FakeProcessRunner : IProcessRunner
         if (Before is not null) await Before(executable);
         Calls.Add(new Invocation(executable, [.. arguments]));
 
-        if (executable == "ffprobe") return ProbeResult;
+        if (executable == "ffprobe")
+            return ProbeFailure is null
+                ? ProbeResult
+                : throw new InvalidOperationException($"ffprobe exited 1: {ProbeFailure}");
 
         if (executable == "ffmpeg")
         {
