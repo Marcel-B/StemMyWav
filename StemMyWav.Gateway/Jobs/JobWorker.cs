@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using StemMyWav.Gateway.Catalog;
 using StemMyWav.Gateway.Configuration;
 
 namespace StemMyWav.Gateway.Jobs;
@@ -9,6 +10,7 @@ namespace StemMyWav.Gateway.Jobs;
 /// <summary>Überträgt wartende Aufträge an die Mac-API und hält das Ergebnis vor.</summary>
 public sealed class JobWorker(
     JobStore store,
+    ModelCatalog catalog,
     IHttpClientFactory clients,
     IOptions<GatewayOptions> gateway,
     IOptions<MacBackendOptions> backend,
@@ -44,15 +46,16 @@ public sealed class JobWorker(
         store.Save(job);
         try
         {
-            var url = backend.Value.Url!.TrimEnd('/') + "/api/separate?dereverb=" + job.Dereverb.ToString().ToLowerInvariant();
+            var url = backend.Value.Url!.TrimEnd('/') +
+                      $"/api/separate?model={Uri.EscapeDataString(job.Model)}&dereverb={job.Dereverb.ToString().ToLowerInvariant()}";
             var target = store.ResultPath(job.Id);
             var temporary = target + ".tmp";
             using (var request = new HttpRequestMessage(HttpMethod.Post, url))
-            await using (var input = File.OpenRead(store.InputPath(job.Id)))
+            await using (var input = File.OpenRead(store.InputPath(job)))
             {
                 request.Headers.Add("X-Api-Key", backend.Value.ApiKey);
                 request.Content = new StreamContent(input);
-                request.Content.Headers.ContentType = new("audio/flac");
+                request.Content.Headers.ContentType = new("audio/" + job.InputFormat);
                 using var response = await clients.CreateClient("mac").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
                 if (!response.IsSuccessStatusCode)
                 {
@@ -62,17 +65,12 @@ public sealed class JobWorker(
                 }
                 await using (var file = File.Create(temporary)) await response.Content.CopyToAsync(file, token);
             }
-            using (var zip = ZipFile.OpenRead(temporary))
-            {
-                if (zip.GetEntry("vocals.wav") is null || zip.GetEntry("instrumental.wav") is null ||
-                    (job.Dereverb && zip.GetEntry("vocals_dry.wav") is null))
-                    throw new InvalidDataException("Mac-API lieferte unvollständige Stems.");
-            }
+            Verify(temporary, job);
             File.Move(temporary, target, true);
             job.Status = JobStatus.Completed;
             job.LastError = null;
             store.Save(job);
-            RemoveInput(job.Id);
+            RemoveInput(job);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -85,7 +83,7 @@ public sealed class JobWorker(
             job.Status = JobStatus.Failed;
             job.LastError = error.Message;
             store.Save(job);
-            RemoveInput(job.Id);
+            RemoveInput(job);
         }
         catch (Exception error)
         {
@@ -95,7 +93,7 @@ public sealed class JobWorker(
                 job.Status = JobStatus.Failed;
                 job.LastError = $"Mac seit über {_gateway.MaxQueueHours} Stunden nicht erreichbar.";
                 store.Save(job);
-                RemoveInput(job.Id);
+                RemoveInput(job);
                 return;
             }
             logger.LogWarning(error, "Job {JobId} will be retried", job.Id);
@@ -104,6 +102,19 @@ public sealed class JobWorker(
             job.NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(Math.Min(300, 15 * Math.Pow(2, Math.Min(5, job.Attempts - 1))));
             store.Save(job);
         }
+    }
+
+    /// <summary>Prüft, ob das ZIP die Stems enthält, die der Katalog für das gewählte Modell nennt.
+    /// Kennt der Katalog das Modell nicht mehr — etwa weil ein Auftrag einen Versionswechsel
+    /// überdauert hat — bleibt es beim Öffnen des Archivs als Prüfung.</summary>
+    private void Verify(string archive, JobRecord job)
+    {
+        using var zip = ZipFile.OpenRead(archive);
+        var expected = catalog.Find(job.Model)?.Stems ?? [];
+        var missing = expected.Where(stem => zip.GetEntry(stem + ".wav") is null).ToList();
+        if (job.Dereverb && zip.GetEntry("vocals_dry.wav") is null) missing.Add("vocals_dry");
+        if (missing.Count > 0)
+            throw new InvalidDataException($"Mac-API lieferte unvollständige Stems: {string.Join(", ", missing)}.");
     }
 
     /// <summary>Übernimmt den Grund aus der Problemantwort des Macs, damit im Job-Status steht,
@@ -129,11 +140,11 @@ public sealed class JobWorker(
     /// Schlüsselwechsel, ist behebbar und darf die Eingabe nicht verwerfen.</summary>
     private static bool IsRejectedInput(HttpStatusCode status) => (int)status is 400 or 413 or 415 or 422;
 
-    private void RemoveInput(Guid id)
+    private void RemoveInput(JobRecord job)
     {
-        try { store.RemoveInput(id); }
-        catch (IOException error) { logger.LogWarning(error, "Input cleanup failed for job {JobId}", id); }
-        catch (UnauthorizedAccessException error) { logger.LogWarning(error, "Input cleanup failed for job {JobId}", id); }
+        try { store.RemoveInput(job); }
+        catch (IOException error) { logger.LogWarning(error, "Input cleanup failed for job {JobId}", job.Id); }
+        catch (UnauthorizedAccessException error) { logger.LogWarning(error, "Input cleanup failed for job {JobId}", job.Id); }
     }
 }
 

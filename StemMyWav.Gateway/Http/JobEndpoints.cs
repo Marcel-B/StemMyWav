@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Options;
+using StemMyWav.Gateway.Catalog;
+using StemMyWav.Gateway.Configuration;
 using StemMyWav.Gateway.Jobs;
 
 namespace StemMyWav.Gateway.Http;
@@ -12,11 +15,18 @@ public static class JobEndpoints
             .WithDescription("Prüft nicht die Erreichbarkeit der Mac-API.")
             .Produces<HealthResponse>();
 
+        routes.MapGet("/api/models", ListModels)
+            .WithName("ListSeparationModels")
+            .WithSummary("Listet die wählbaren Trennmodelle")
+            .WithDescription("Die Kennung aus id gehört in den model-Parameter von POST /api/jobs. stems nennt die Dateien im Ergebnis-ZIP, jeweils mit der Endung .wav. speed schätzt den Rechenaufwand: fast rechnet schneller als der Titel dauert, verySlow braucht ein Vielfaches davon. realtimeFactor ist Audiodauer geteilt durch Rechenzeit — 0,3 heißt, dass ein Vier-Minuten-Titel rund dreizehn Minuten dauert. Ist measured false, stammt die Einstufung aus dem Vergleich mit einem gemessenen Modell derselben Familie. Die Liste kommt aus dem Gateway selbst und ist deshalb auch dann abrufbar, wenn der Mac gerade nicht erreichbar ist.")
+            .Produces<IReadOnlyList<ModelResponse>>()
+            .Produces(StatusCodes.Status401Unauthorized);
+
         routes.MapPost("/api/jobs", CreateJobAsync)
             .WithName("CreateSeparationJob")
-            .WithSummary("Nimmt eine FLAC-Datei zur Stem-Separation an")
-            .WithDescription("Der Request-Body ist die rohe FLAC-Datei, kein Multipart-Formular. dereverb=true erzeugt zusätzlich trockenen Gesang und, sofern das Modell ihn ausgibt, den Hallanteil. Die Location-Antwort zeigt auf den Job-Status. Maximal 512 MiB. Bei voller Warteschlange nennt Retry-After den Abstand bis zum nächsten Versuch.")
-            .Accepts<Stream>("audio/flac")
+            .WithSummary("Nimmt eine FLAC- oder WAV-Datei zur Stem-Separation an")
+            .WithDescription("Der Request-Body ist die rohe Audiodatei, kein Multipart-Formular; Content-Type ist audio/flac oder audio/wav. model wählt das Trennmodell aus GET /api/models; ohne Angabe gilt die Voreinstellung. Das Ergebnis ist unabhängig von der Eingabe immer 48-kHz-/16-Bit-Stereo-WAV. dereverb=true erzeugt zusätzlich trockenen Gesang und, sofern das Modell ihn ausgibt, den Hallanteil; es setzt ein Modell mit Gesangs-Stem voraus. Die Location-Antwort zeigt auf den Job-Status. Maximal 512 MiB. Bei voller Warteschlange nennt Retry-After den Abstand bis zum nächsten Versuch.")
+            .Accepts<Stream>("audio/flac", "audio/wav")
             .Produces<JobAcceptedResponse>(StatusCodes.Status202Accepted)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status413PayloadTooLarge)
@@ -27,7 +37,7 @@ public static class JobEndpoints
         routes.MapGet("/api/jobs", ListJobs)
             .WithName("ListSeparationJobs")
             .WithSummary("Listet alle bekannten Aufträge")
-            .WithDescription("Jüngste zuerst. Zeigt auch Aufträge, die die Warteschlange belegen, damit ein hängender Auftrag gefunden und mit DELETE abgebrochen werden kann.")
+            .WithDescription("Jüngste zuerst. model nennt das verwendete Trennmodell und stems die Dateien, die das Ergebnis-ZIP enthält. Zeigt auch Aufträge, die die Warteschlange belegen, damit ein hängender Auftrag gefunden und mit DELETE abgebrochen werden kann.")
             .Produces<IReadOnlyList<JobStatusResponse>>()
             .Produces(StatusCodes.Status401Unauthorized);
 
@@ -42,7 +52,7 @@ public static class JobEndpoints
         routes.MapGet("/api/jobs/{id:guid}/result", DownloadResult)
             .WithName("DownloadSeparationResult")
             .WithSummary("Lädt das Ergebnis-ZIP herunter")
-            .WithDescription("Enthält 48-kHz-/16-Bit-Stereo-WAVs: vocals.wav und instrumental.wav; bei dereverb=true zusätzlich vocals_dry.wav und, sofern das Modell ihn ausgibt, vocals_reverb.wav. Erst nach erfolgreichem Speichern und Importieren DELETE aufrufen.")
+            .WithDescription("Enthält 48-kHz-/16-Bit-Stereo-WAVs, benannt nach den stems des gewählten Modells — bei den Zwei-Stem-Modellen also vocals.wav und instrumental.wav, bei htdemucs_6s sechs Dateien. Bei dereverb=true kommen vocals_dry.wav und, sofern das De-Reverb-Modell ihn ausgibt, vocals_reverb.wav hinzu. Erst nach erfolgreichem Speichern und Importieren DELETE aufrufen.")
             .Produces<Stream>(StatusCodes.Status200OK, "application/zip")
             .Produces(StatusCodes.Status401Unauthorized)
             .Produces(StatusCodes.Status404NotFound)
@@ -60,34 +70,54 @@ public static class JobEndpoints
         return routes;
     }
 
-    private static async Task<IResult> CreateJobAsync(HttpContext context, JobStore store, bool? dereverb)
+    private static IResult ListModels(ModelCatalog catalog, IOptions<GatewayOptions> options)
     {
-        if (context.Request.ContentType is not ("audio/flac" or "audio/x-flac"))
-            return Results.Problem("Content-Type muss audio/flac sein.", statusCode: 415);
+        var fallback = catalog.ResolveDefault(options.Value.DefaultModel);
+        return Results.Ok(catalog.Models.Select(model => new ModelResponse(
+            model.Id, model.Name, model.Family, model.Task, model.Stems, model.Speed,
+            model.RealtimeFactor, model.Measured, model.PublishedSdr, model.Notes,
+            model.Id == fallback.Id)).ToList());
+    }
+
+    private static async Task<IResult> CreateJobAsync(
+        HttpContext context, JobStore store, ModelCatalog catalog, IOptions<GatewayOptions> options, string? model, bool? dereverb)
+    {
+        var extension = AudioUpload.Extension(context.Request.ContentType);
+        if (extension is null) return Results.Problem(AudioUpload.UnsupportedType, statusCode: 415);
+
+        // Die Kennung wird hier geprüft und nicht erst auf dem Mac: eine Datei, die ohnehin nie
+        // laufen kann, soll gar nicht erst einen Platz in der Warteschlange belegen.
+        var chosen = model is { Length: > 0 } ? catalog.Find(model) : catalog.ResolveDefault(options.Value.DefaultModel);
+        if (chosen is null)
+            return Results.Problem($"Unbekanntes Modell: {model}. Die wählbaren Kennungen stehen unter /api/models.", statusCode: 400);
+        if (dereverb == true && !chosen.ProducesVocals)
+            return Results.Problem($"Das Modell {chosen.Id} erzeugt keinen Gesangs-Stem; dereverb ist damit nicht möglich.", statusCode: 400);
 
         // Der Dateianfang entscheidet über die Annahme, bevor bis zu 512 MiB auf die Platte gehen.
-        var prefix = new byte[4];
+        var prefix = new byte[AudioUpload.PrefixLength];
         var read = await context.Request.Body.ReadAtLeastAsync(prefix, prefix.Length, throwOnEndOfStream: false, context.RequestAborted);
-        if (read != prefix.Length || !prefix.AsSpan().SequenceEqual("fLaC"u8))
-            return Results.Problem("Ungültige FLAC-Datei.", statusCode: 400);
+        if (!AudioUpload.Matches(extension, prefix.AsSpan(0, read)))
+            return Results.Problem(AudioUpload.Invalid(extension), statusCode: 400);
 
-        var job = await store.CreateAsync(prefix, context.Request.Body, dereverb == true, context.RequestAborted);
+        var job = await store.CreateAsync(prefix.AsMemory(0, read), context.Request.Body, chosen.Id, extension,
+            dereverb == true, context.RequestAborted);
         if (job is null)
         {
             context.Response.Headers.RetryAfter = "60";
             return Results.Problem("Warteschlange voll. Später erneut versuchen.", statusCode: 429);
         }
-        return Results.Accepted($"/api/jobs/{job.Id}", new JobAcceptedResponse(job.Id, job.Status));
+        return Results.Accepted($"/api/jobs/{job.Id}", new JobAcceptedResponse(job.Id, job.Status, job.Model));
     }
 
-    private static IResult ListJobs(JobStore store) =>
-        Results.Ok(store.All().Select(Describe).ToList());
+    private static IResult ListJobs(JobStore store, ModelCatalog catalog) =>
+        Results.Ok(store.All().Select(job => Describe(job, catalog)).ToList());
 
-    private static JobStatusResponse Describe(JobRecord job) =>
-        new(job.Id, job.Status, job.Attempts, job.LastError, job.CreatedUtc, job.UpdatedUtc);
+    private static JobStatusResponse Describe(JobRecord job, ModelCatalog catalog) =>
+        new(job.Id, job.Status, job.Model, catalog.Find(job.Model)?.Stems ?? [],
+            job.Attempts, job.LastError, job.CreatedUtc, job.UpdatedUtc);
 
-    private static IResult ReadJob(Guid id, JobStore store) =>
-        store.Read(id) is { } job ? Results.Ok(Describe(job)) : Results.NotFound();
+    private static IResult ReadJob(Guid id, JobStore store, ModelCatalog catalog) =>
+        store.Read(id) is { } job ? Results.Ok(Describe(job, catalog)) : Results.NotFound();
 
     private static IResult DownloadResult(Guid id, JobStore store)
     {

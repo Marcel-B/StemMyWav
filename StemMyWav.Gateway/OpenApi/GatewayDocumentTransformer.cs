@@ -12,7 +12,7 @@ public sealed class GatewayDocumentTransformer : IOpenApiDocumentTransformer
     public Task TransformAsync(OpenApiDocument document, OpenApiDocumentTransformerContext context, CancellationToken cancellationToken)
     {
         document.Info.Title = "StemMyWav Gateway API";
-        document.Info.Description = "Asynchrone Trennung einer FLAC-Datei in WAV-Stems. YuE_To_Logic lädt das Ergebnis-ZIP herunter und bestätigt den Import mit DELETE.";
+        document.Info.Description = "Asynchrone Trennung einer FLAC- oder WAV-Datei in 48-kHz-/16-Bit-Stereo-WAV-Stems. GET /api/models nennt die wählbaren Trennmodelle; die Kennung gehört in den model-Parameter von POST /api/jobs. YuE_To_Logic lädt das Ergebnis-ZIP herunter und bestätigt den Import mit DELETE.";
         document.Components ??= new OpenApiComponents();
         document.Components.SecuritySchemes = new Dictionary<string, IOpenApiSecurityScheme>
         {

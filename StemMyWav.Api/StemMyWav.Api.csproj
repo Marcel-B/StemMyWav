@@ -6,4 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Der Modellkatalog liegt im Wurzelverzeichnis, damit beide Dienste dieselbe Datei lesen. -->
+    <EmbeddedResource Include="../models.json" LogicalName="models.json" />
+  </ItemGroup>
+
 </Project>
