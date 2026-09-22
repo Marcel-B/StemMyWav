@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Net;
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using StemMyWav.Gateway.Configuration;
 
@@ -56,7 +57,7 @@ public sealed class JobWorker(
                 if (!response.IsSuccessStatusCode)
                 {
                     if (IsRejectedInput(response.StatusCode))
-                        throw new PermanentJobException($"Mac-API antwortete mit {(int)response.StatusCode}.");
+                        throw new PermanentJobException(await DescribeAsync(response, token));
                     throw new HttpRequestException($"Mac-API antwortete mit {(int)response.StatusCode}.");
                 }
                 await using (var file = File.Create(temporary)) await response.Content.CopyToAsync(file, token);
@@ -103,6 +104,25 @@ public sealed class JobWorker(
             job.NextAttemptUtc = DateTimeOffset.UtcNow.AddSeconds(Math.Min(300, 15 * Math.Pow(2, Math.Min(5, job.Attempts - 1))));
             store.Save(job);
         }
+    }
+
+    /// <summary>Übernimmt den Grund aus der Problemantwort des Macs, damit im Job-Status steht,
+    /// was mit der Datei nicht stimmte, und nicht nur der Statuscode.</summary>
+    private static async Task<string> DescribeAsync(HttpResponseMessage response, CancellationToken token)
+    {
+        var fallback = $"Mac-API antwortete mit {(int)response.StatusCode}.";
+        try
+        {
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token));
+            if (document.RootElement.TryGetProperty("detail", out var detail) &&
+                detail.GetString() is { Length: > 0 } reason)
+                return reason.Length > 300 ? reason[..300] : reason;
+        }
+        catch (Exception error) when (error is JsonException or HttpRequestException or InvalidOperationException)
+        {
+            // Ohne verwertbaren Körper bleibt der Statuscode.
+        }
+        return fallback;
     }
 
     /// <summary>Nur eine Ablehnung der FLAC selbst ist endgültig; alles andere, auch 401 nach einem

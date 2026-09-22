@@ -46,6 +46,13 @@ public static class SeparationEndpoints
         {
             return Results.StatusCode(499);
         }
+        catch (UnreadableInputException error)
+        {
+            // Als 4xx gemeldet, damit der Gateway den Auftrag sofort abschließt, statt eine
+            // unbrauchbare Datei stundenlang erneut zu schicken und die Warteschlange zu belegen.
+            logger.LogWarning(error, "Rejected an unreadable upload");
+            return Results.Problem(error.Message, statusCode: 400);
+        }
         catch (Exception error)
         {
             logger.LogError(error, "Separation failed");

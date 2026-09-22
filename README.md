@@ -85,11 +85,13 @@ Das Volume `stemmywav-data` hält Eingaben nur bis zur erfolgreichen Verarbeitun
 Jede `/api`-Anfrage an den Gateway braucht `X-Api-Key` mit dem Wert aus `STEMMYWAV_GATEWAY_API_KEY`. Die Schnittstelle ist asynchron, damit ein Mac-Ausfall keinen FLAC-Upload verliert:
 
 1. `POST /api/jobs?dereverb=true` mit `Content-Type: audio/flac` und dem FLAC-Dateiinhalt liefert `202 Accepted`, eine Job-ID und einen `Location`-Header.
-2. `GET /api/jobs/{id}` liefert `queued`, `processing`, `completed` oder `failed` sowie die Anzahl der Versuche.
+2. `GET /api/jobs/{id}` liefert `queued`, `processing`, `completed` oder `failed` sowie die Anzahl der Versuche. `GET /api/jobs` listet alle bekannten Aufträge, jüngste zuerst — damit lässt sich finden, was die Warteschlange belegt.
 3. Bei `completed` liefert `GET /api/jobs/{id}/result` ein ZIP mit `vocals.wav`, `instrumental.wav` und bei `dereverb=true` zusätzlich `vocals_dry.wav` sowie `vocals_reverb.wav`, sofern das De-Reverb-Modell den Hallanteil ausgibt.
 4. **Nach erfolgreichem Speichern und Importieren** ruft YuE_To_Logic `DELETE /api/jobs/{id}` auf. Damit verschwinden ZIP und Job-Status sofort aus dem Gateway. Ein späterer Abruf liefert `404`. Derselbe Aufruf bricht einen noch wartenden Auftrag (`queued`) ab und gibt dessen Platz in der Warteschlange frei; nur während der laufenden Übertragung zum Mac (`processing`) ist das Löschen mit `409` gesperrt.
 
-Das Upload-Limit beträgt 512 MiB. Fehlerantworten sind `application/problem+json`. `GET /health` prüft nur den lokalen API-Prozess, nicht die Erreichbarkeit des Macs; der Gateway-Container meldet damit zusätzlich seinen Docker-Healthstatus. Endgültig `failed` wird ein Auftrag nur, wenn die Mac-API die Datei selbst ablehnt (`400`, `413`, `415`, `422`). Alles andere gilt als behebbar und wird wiederholt — auch ein `401` nach einem Schlüsselwechsel, damit ein Konfigurationsfehler die hochgeladene FLAC nicht verwirft.
+Das Upload-Limit beträgt 512 MiB. Fehlerantworten sind `application/problem+json`. `GET /health` prüft nur den lokalen API-Prozess, nicht die Erreichbarkeit des Macs; der Gateway-Container meldet damit zusätzlich seinen Docker-Healthstatus.
+
+Endgültig `failed` wird ein Auftrag nur, wenn die Mac-API die Datei selbst ablehnt (`400`, `413`, `415`, `422`); der genannte Grund steht dann in `lastError`. Dazu zählt eine FLAC, die sich nicht dekodieren lässt — etwa eine abgeschnittene Datei, die zwar mit `fLaC` beginnt, aber keinen lesbaren Audiostrom enthält. Alles andere gilt als behebbar und wird wiederholt, auch ein `401` nach einem Schlüsselwechsel, damit ein Konfigurationsfehler die hochgeladene FLAC nicht verwirft.
 
 ## OpenAPI und Swagger UI
 
@@ -105,7 +107,7 @@ Compose bindet Port 8080 standardmäßig nur an `127.0.0.1` des CT. Für Swagger
 ssh -L 8080:127.0.0.1:8080 root@stem
 ```
 
-Die API selbst bleibt für YuE_To_Logic im Docker-Netz unter `http://stemmywav:8080` erreichbar. In Swagger UI lässt sich der Gateway-Schlüssel über **Authorize** für Testaufrufe setzen.
+Die API selbst bleibt für YuE_To_Logic im Docker-Netz unter `http://stemmywav:8080` erreichbar. In Swagger UI lässt sich der Gateway-Schlüssel über **Authorize** setzen; danach sind dort auch die Betriebsaufgaben erledigt: `GET /api/jobs` zeigt, was die Warteschlange belegt, und `DELETE /api/jobs/{id}` bricht einen wartenden Auftrag ab oder räumt einen abgeschlossenen weg.
 
 Soll ein Reverse Proxy auf einem anderen LAN-Rechner (`stem.idsrv.info`) den Gateway erreichen, in der `.env` auf dem CT `STEMMYWAV_GATEWAY_BIND` auf dessen LAN-Adresse setzen, z. B. `192.168.2.74`. Der Proxy muss dann per HTTP auf `192.168.2.74:8080` weiterleiten. Diese Bindung macht die gesamte Gateway-API im LAN erreichbar; API-Aufrufe unter `/api` erfordern weiterhin `X-Api-Key`. Schlüsselwerte stehen weder in Swagger UI noch im OpenAPI-Dokument.
 Bei dieser Einstellung den OpenAPI-Export und den Health-Check über `http://192.168.2.74:8080` statt über `127.0.0.1` aufrufen.

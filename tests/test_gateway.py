@@ -163,6 +163,7 @@ class GatewayIntegrationTest(unittest.TestCase):
                                  specification["components"]["schemas"]["JobStatusResponse"]["properties"]["status"]["$ref"])
                 self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs"]["post"]["requestBody"]["content"]["audio/flac"]["schema"]["$ref"])
                 self.assertEqual("#/components/schemas/Stream", specification["paths"]["/api/jobs/{id}/result"]["get"]["responses"]["200"]["content"]["application/zip"]["schema"]["$ref"])
+                self.assertEqual({"GatewayApiKey": []}, specification["paths"]["/api/jobs"]["get"]["security"][0])
                 self.assertEqual(200, request(base + "/swagger/index.html")[0])
 
                 self.assertEqual(401, request(base + "/api/jobs/00000000-0000-0000-0000-000000000000")[0])
@@ -215,6 +216,81 @@ class UnauthorizedStub(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass
+
+
+class RejectingStub(BaseHTTPRequestHandler):
+    """Stands in for a Mac that refuses the upload itself, as with a truncated FLAC."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        payload = json.dumps({
+            "title": "Bad Request",
+            "status": 400,
+            "detail": "Die Datei ließ sich nicht lesen; sie ist vermutlich unvollständig oder beschädigt.",
+        }).encode()
+        self.send_response(400)
+        self.send_header("Content-Type", "application/problem+json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_args):
+        pass
+
+
+class UnreadableUploadTest(unittest.TestCase):
+    def test_a_refused_upload_fails_once_and_frees_the_queue(self):
+        with run_gateway(RejectingStub, Gateway__MaxPendingJobs="1") as (base, data):
+            status, payload = request(base + "/api/jobs", "POST", b"fLaCtest", "gateway-test-key", "audio/flac")
+            self.assertEqual(202, status)
+            job_id = json.loads(payload)["id"]
+
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                job = json.loads(request(base + f"/api/jobs/{job_id}", key="gateway-test-key")[1])
+                if job["status"] == "failed":
+                    break
+                time.sleep(0.25)
+            else:
+                self.fail("Job was retried instead of failing")
+
+            # Der Grund aus der Mac-Antwort steht im Status, nicht nur der Statuscode.
+            self.assertIn("unvollständig", job["lastError"])
+            self.assertEqual(1, job["attempts"])
+            self.assertFalse((data / job_id / "input.flac").exists())
+
+            # Der Platz ist sofort wieder frei.
+            self.assertEqual(202, request(base + "/api/jobs", "POST", b"fLaCtest",
+                                          "gateway-test-key", "audio/flac")[0])
+
+    def test_listing_shows_jobs_and_supports_cleaning_them_up(self):
+        with run_gateway(RejectingStub) as (base, _data):
+            self.assertEqual(401, request(base + "/api/jobs")[0])
+            self.assertEqual([], json.loads(request(base + "/api/jobs", key="gateway-test-key")[1]))
+
+            ids = []
+            for _ in range(2):
+                status, payload = request(base + "/api/jobs", "POST", b"fLaCtest", "gateway-test-key", "audio/flac")
+                self.assertEqual(202, status)
+                ids.append(json.loads(payload)["id"])
+
+            status, payload = request(base + "/api/jobs", key="gateway-test-key")
+            self.assertEqual(200, status)
+            listed = json.loads(payload)
+            self.assertEqual(set(ids), {job["id"] for job in listed})
+            for job in listed:
+                self.assertIn(job["status"], {"queued", "processing", "failed"})
+                self.assertIn("attempts", job)
+
+            for job_id in ids:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if request(base + f"/api/jobs/{job_id}", "DELETE", key="gateway-test-key")[0] == 204:
+                        break
+                    time.sleep(0.25)
+                else:
+                    self.fail("Job could not be deleted")
+            self.assertEqual([], json.loads(request(base + "/api/jobs", key="gateway-test-key")[1]))
 
 
 class QueueRecoveryTest(unittest.TestCase):

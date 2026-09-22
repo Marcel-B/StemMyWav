@@ -76,7 +76,37 @@ public sealed class SeparatorServiceTests : IDisposable
     {
         _runner.ProbeResult = FakeProcessRunner.Probe("mp3", "44100", 2);
 
-        await Assert.ThrowsAsync<InvalidDataException>(() =>
+        var error = await Assert.ThrowsAsync<UnreadableInputException>(() =>
+            Create().RunAsync(Source(), _work, dereverb: false, CancellationToken.None));
+        Assert.Contains("FLAC", error.Message);
+    }
+
+    [Fact]
+    public async Task Reports_a_truncated_file_as_a_caller_error()
+    {
+        // Genau der Fall aus dem Betrieb: die Magic Bytes stimmen, danach bricht die Datei ab.
+        _runner.ProbeFailure = "input.flac: End of file";
+
+        var error = await Assert.ThrowsAsync<UnreadableInputException>(() =>
+            Create().RunAsync(Source(), _work, dereverb: false, CancellationToken.None));
+        Assert.Contains("unvollständig", error.Message);
+    }
+
+    [Fact]
+    public async Task Reports_a_file_without_an_audio_track_as_a_caller_error()
+    {
+        _runner.ProbeResult = """{"streams":[]}""";
+
+        await Assert.ThrowsAsync<UnreadableInputException>(() =>
+            Create().RunAsync(Source(), _work, dereverb: false, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Reports_unreadable_probe_output_as_a_caller_error()
+    {
+        _runner.ProbeResult = "not json";
+
+        await Assert.ThrowsAsync<UnreadableInputException>(() =>
             Create().RunAsync(Source(), _work, dereverb: false, CancellationToken.None));
     }
 

@@ -42,6 +42,18 @@ public sealed class JobStore(IOptions<GatewayOptions> options)
         catch { Directory.Delete(dir, true); throw; }
     }
 
+    /// <summary>Alle bekannten Aufträge, jüngste zuerst.</summary>
+    public IReadOnlyList<JobRecord> All()
+    {
+        if (!Directory.Exists(_root)) return [];
+        var jobs = new List<JobRecord>();
+        foreach (var dir in Directory.EnumerateDirectories(_root))
+            if (Guid.TryParse(Path.GetFileName(dir), out var id) && Read(id) is { } job)
+                jobs.Add(job);
+        jobs.Sort((left, right) => right.CreatedUtc.CompareTo(left.CreatedUtc));
+        return jobs;
+    }
+
     public IEnumerable<JobRecord> Pending()
     {
         if (!Directory.Exists(_root)) yield break;
