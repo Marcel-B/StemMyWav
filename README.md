@@ -26,7 +26,7 @@ StemMyWav.Gateway/
   Configuration/  Gateway- und Backend-Einstellungen, Geheimnisse aus Datei
 StemMyWav.Api/
   Http/           Endpunkte und Schlüsselprüfung
-  Separation/     Ablauf der Trennung und Ausführung externer Programme
+  Separation/     Ablauf der Trennung, Arbeitsverzeichnisse, externe Programme
   Configuration/  Separator- und Schlüsseleinstellungen
 StemMyWav.Api.Tests/  Unit-Tests der Trennlogik, ohne echte Prozesse
 ```
@@ -57,6 +57,8 @@ openssl rand -hex 32 > ~/.config/stemmywav/mac-api-key
 ```
 
 `deploy/mac/start.sh` startet die API auf `127.0.0.1:5081` mit diesem Schlüssel. Der vorbereitete LaunchAgent liegt in `deploy/mac/com.marcel.stemmywav.macapi.plist` und verwendet die Pfade dieses Macs. Nach dem Kopieren nach `~/Library/LaunchAgents` kann er mit `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.marcel.stemmywav.macapi.plist` gestartet werden. Danach `tailscale serve --bg 5081` ausführen und die angezeigte HTTPS-Adresse für den Gateway notieren. Tailscale Funnel wird nicht benötigt. Die Tailnet-Zugriffsregeln sollten den Mac-Dienst für den Proxmox-Knoten freigeben.
+
+Jede Anfrage arbeitet in einem eigenen Temp-Verzeichnis, das nach dem Senden der Antwort gelöscht wird — auch dann, wenn die Trennung fehlschlägt. Bricht der Dienst mitten in einer Trennung ab, etwa durch einen Neustart, bleibt das Verzeichnis mit den bereits erzeugten WAVs liegen. Solche Reste sammelt der Dienst beim Start und danach stündlich ein, sobald sie älter als eine Stunde sind. Verzeichnisse laufender Anfragen sind ausgenommen, unabhängig davon, wie lange eine Trennung dauert.
 
 ## Proxmox-Gateway einrichten
 
